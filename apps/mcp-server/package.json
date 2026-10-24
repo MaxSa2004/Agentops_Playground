@@ -1,0 +1,6 @@
+{
+  "name": "@agentops/mcp-server",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": { "dev": "echo 'MCP server implementation is planned for a later phase.'" }
+}

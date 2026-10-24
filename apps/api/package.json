@@ -1,0 +1,6 @@
+{
+  "name": "@agentops/api",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": { "dev": "echo 'API implementation is planned for a later phase.'" }
+}
