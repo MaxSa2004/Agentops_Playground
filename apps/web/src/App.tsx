@@ -20,6 +20,14 @@ const scenarios: Scenario[] = [
   { label: 'Login issue', input: { ticketId: 'TK-1982', request: 'A customer cannot access their account after resetting their password. Find the ticket and recommend a safe next step.', issueType: 'account_access', customerImpact: 'single_customer', daysWaiting: 1 } },
   { label: 'Damaged delivery', input: { ticketId: 'TK-2116', request: 'Review the damaged delivery complaint and determine the right team and recommended action.', issueType: 'damaged_delivery', customerImpact: 'single_customer', daysWaiting: 3 } },
 ]
+const profileName = 'Maximiliano Sá'
+
+function greetingForLocalTime(date = new Date()): string {
+  const hour = date.getHours()
+  if (hour >= 12 && hour < 17) return 'Good afternoon'
+  if (hour >= 17 || hour < 5) return 'Good evening'
+  return 'Good morning'
+}
 
 const demoMcpTools: McpToolView[] = [
   { name: 'list_tickets', description: 'List fictional support tickets', inputSchema: { type: 'object', properties: {} }, annotations: { readOnlyHint: true } },
@@ -60,6 +68,7 @@ function eventSourceLabel(origin: string | undefined, type: string, backendAvail
 }
 
 function App() {
+  const [greeting, setGreeting] = useState(() => greetingForLocalTime())
   const [scenarioIndex, setScenarioIndex] = useState(0)
   const [workflowInput, setWorkflowInput] = useState<WorkflowInput>(scenarios[0].input)
   const [workflowResult, setWorkflowResult] = useState<ReturnType<typeof runTriageWorkflow> | null>(null)
@@ -103,6 +112,11 @@ function App() {
         void requestApi<{ tools: McpToolView[] }>('/api/mcp/tools', { method: 'GET' }).then((result) => setMcpTools(result.tools)).catch(() => setMcpConnected(false))
       }
     }).catch(() => setBackendAvailable(false))
+  }, [])
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setGreeting(greetingForLocalTime()), 60_000)
+    return () => window.clearInterval(timer)
   }, [])
 
   const pickScenario = (index: number) => {
@@ -237,13 +251,13 @@ function App() {
       <aside className={`sidebar ${mobileNav ? 'sidebar-open' : ''}`}>
         <div className="brand"><div className="brand-mark"><Command size={19} strokeWidth={2.4} /></div><div><strong>agentops</strong><span>PLAYGROUND</span></div></div>
         <div className="workspace-label">WORKSPACE <ChevronDown size={13} /></div>
-        <div className="workspace-card"><div className="workspace-avatar">A</div><div><strong>Acme Support</strong><small>Local workspace</small></div><MoreHorizontal size={17} className="muted-icon" /></div>
+        <div className="workspace-card"><div className="workspace-avatar">A</div><div><strong>AgentOps Support</strong><small>Local workspace</small></div><MoreHorizontal size={17} className="muted-icon" /></div>
         <div className="nav-heading">PLATFORM</div>
         <nav aria-label="Main navigation">{navItems.map(({ name, icon: Icon, target }) => <button key={name} className={`nav-item ${activeNav === name ? 'active' : ''}`} onClick={() => navigate(name, target)}><Icon size={17} /><span>{name}</span>{name === 'Approvals' && <b className="nav-count">1</b>}</button>)}</nav>
         <div className="nav-heading workflow-heading">WORKFLOWS</div>
         <button className="nav-item workflow-item" onClick={() => navigate('Playground', 'playground')}><GitBranch size={17} /><span>Support triage</span><span className="live-dot" /></button>
         <button className="nav-item" onClick={() => setNotice('Workflow builder is part of a later phase.')}><Plus size={17} /><span>New workflow</span></button>
-        <div className="sidebar-bottom"><div className="local-status"><span className="status-pulse" /><span>Demo environment</span><span className="status-tag">LIVE</span></div><button className="nav-item" onClick={() => setNotice('Settings are illustrative in this demo.')}><Settings2 size={17} /><span>Settings</span></button><div className="profile"><div className="profile-avatar">JD</div><div><strong>Jordan Davis</strong><small>Developer</small></div><MoreHorizontal size={17} className="muted-icon" /></div></div>
+        <div className="sidebar-bottom"><div className="local-status"><span className="status-pulse" /><span>Demo environment</span><span className="status-tag">LIVE</span></div><button className="nav-item" onClick={() => setNotice('Settings are illustrative in this demo.')}><Settings2 size={17} /><span>Settings</span></button><div className="profile"><div className="profile-avatar">MS</div><div><strong>{profileName}</strong><small>Developer</small></div><MoreHorizontal size={17} className="muted-icon" /></div></div>
       </aside>
 
       {mobileNav && <button className="mobile-scrim" aria-label="Close navigation" onClick={() => setMobileNav(false)} />}
@@ -252,7 +266,7 @@ function App() {
 
         <div className="page-content">
           {notice && <div className="notice" role="status"><span>{notice}</span><button aria-label="Dismiss" onClick={() => setNotice('')}><X size={15} /></button></div>}
-          <section className="page-heading"><div><div className="eyebrow"><span className="eyebrow-line" /> YOUR AGENT WORKSPACE</div><h1>Good morning, Jordan <span className="wave">✳</span></h1><p>Understand. Decide. Act. Safely.</p></div><button className="outline-button" onClick={() => setNotice('All metrics shown here come from this demonstration workflow.')}><Clock3 size={15} /> Last 24 hours <ChevronDown size={14} /></button></section>
+          <section className="page-heading"><div><div className="eyebrow"><span className="eyebrow-line" /> YOUR AGENT WORKSPACE</div><h1>{greeting}, {profileName.split(' ')[0]} <span className="wave">✳</span></h1><p>Understand. Decide. Act. Safely.</p></div><button className="outline-button" onClick={() => setNotice('All metrics shown here come from this demonstration workflow.')}><Clock3 size={15} /> Last 24 hours <ChevronDown size={14} /></button></section>
 
           <section className="metrics-grid" aria-label="Workflow metrics">
             <Metric icon={Activity} label="Workflows run" value="128" change="12.8%" positive detail="vs. previous period" />
