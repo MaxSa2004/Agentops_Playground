@@ -187,6 +187,14 @@ Pull requests targeting `main` run the static build but do not deploy. The workf
 - The public website is static and unauthenticated. Its approvals and policy outcomes are illustrative browser behavior, not a security boundary.
 - `.env` files are ignored by Git; `.env.example` contains only local defaults. Do not put secrets or real customer data in this repository.
 
+## AI-Assisted Development
+
+OpenAI Codex was used as a coding assistant during development to help explore implementation approaches, write and refine code, debug issues, and improve test coverage.
+
+The project was iteratively developed and validated through automated tests, build checks, dependency audits, and local end-to-end testing. AI-generated changes were reviewed against the intended architecture and security boundaries.
+
+AI-assisted development was also an opportunity to explore how coding agents can contribute to real software engineering workflows.
+
 ## Repository layout
 
 ```text
