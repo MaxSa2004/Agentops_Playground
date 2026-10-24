@@ -4,7 +4,7 @@ import { evaluatePolicy, parseProposedAction, runTriageWorkflow, type DemoTicket
 import { createOllamaAdapter, OllamaError, type OllamaAdapter } from './ollama'
 import { createMcpClientAdapter, McpClientError, validateJsonSchema, type DiscoveredMcpTool, type McpAdapter } from './mcp-client'
 
-export type ApprovalStatus = 'pending' | 'approved' | 'rejected' | 'blocked' | 'executed'
+export type ApprovalStatus = 'pending' | 'approved' | 'executing' | 'rejected' | 'blocked' | 'executed'
 
 export interface ApprovalRecord {
   id: string
@@ -387,6 +387,7 @@ export function createApp(options: AppOptions = {}) {
       const record = state.approvals.get(request.body.approvalId)
       if (!record) return response.status(404).json({ error: 'Approval was not found.' })
       if (record.status === 'executed') return response.status(409).json({ error: 'Approved action has already been executed.', approval: publicApproval(record) })
+      if (record.status === 'executing') return response.status(409).json({ error: 'Approved action is already executing.', approval: publicApproval(record) })
       if (record.status !== 'approved') return response.status(record.status === 'blocked' ? 403 : 409).json({ error: `Action cannot execute while approval is ${record.status}.`, approval: publicApproval(record) })
 
       const currentDecision = evaluator(record.action)
@@ -409,6 +410,10 @@ export function createApp(options: AppOptions = {}) {
         return response.status(409).json({ decision: currentDecision, error: 'Approval is required before execution.' })
       }
       const run = record.workflowId ? state.workflows.get(record.workflowId) : undefined
+      record.status = 'executing'
+      record.updatedAt = timestamp()
+      if (run) appendWorkflowEvent(run, 'approval_execution_started', 'Approved action is executing through the MCP client.', { status: 'executing' }, record.id, 'api')
+      else recordEvent('approval_execution_started', 'Approved action is executing through the MCP client.', record.id)
       try {
         const result = await executeMcpAction(mcp, record.action, (type, message, data) => {
           if (run) appendWorkflowEvent(run, type, message, data, record.id, type === 'tool_result' ? 'mcp-server' : 'mcp-client')

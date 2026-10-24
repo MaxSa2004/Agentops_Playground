@@ -11,7 +11,7 @@ import {
 type Scenario = { label: string; input: WorkflowInput }
 type DemoActionMode = 'allow' | 'approval' | 'block'
 type PolicyView = { outcome: 'ALLOW' | 'BLOCK' | 'REQUIRE_APPROVAL'; reason: string }
-type ApprovalView = { id?: string; status: 'pending' | 'approved' | 'rejected' | 'blocked' | 'executed' | 'demo_only' }
+type ApprovalView = { id?: string; status: 'pending' | 'approved' | 'executing' | 'rejected' | 'blocked' | 'executed' | 'demo_only' }
 type ApiEventView = { id: string; type: string; timestamp: string; message: string; workflowId?: string; origin?: string; data?: Record<string, unknown> }
 type OllamaStatusView = { available: boolean; model: string; modelAvailable: boolean; message?: string }
 type McpToolView = { name: string; description?: string; inputSchema: Record<string, unknown>; annotations?: Record<string, unknown> }
@@ -32,7 +32,7 @@ const demoMcpTools: McpToolView[] = [
 const timelineTitles: Record<string, string> = {
   task_received: 'Task received', decisions_generated: 'Typed decisions generated', tool_requested: 'Tool requested',
   tool_result: 'Tool result received', policy_evaluated: 'Policy evaluated', approval_requested: 'Approval requested',
-  approval_granted: 'Approval granted', approval_rejected: 'Approval rejected', action_executed: 'Action executed',
+  approval_granted: 'Approval granted', approval_execution_started: 'Approved action executing', approval_rejected: 'Approval rejected', action_executed: 'Action executed',
   action_blocked: 'Action blocked', execution_blocked: 'Execution blocked', demo_action_illustrated: 'Demo action illustrated',
   ollama_request_started: 'Local model request started', ollama_response_received: 'Model assessment received', ollama_error: 'Local model error',
   mcp_connection_established: 'MCP connection established', mcp_tools_discovered: 'MCP tools discovered',

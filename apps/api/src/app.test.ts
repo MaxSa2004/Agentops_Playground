@@ -347,4 +347,36 @@ describe('approval and policy HTTP API', () => {
     await request(app).post('/api/actions/execute').send({ approvalId: started.body.approval.id }).expect(409)
     expect(call.mock.calls.filter(([name]) => name === 'update_ticket_priority')).toHaveLength(1)
   })
+
+  it('rejects a concurrent duplicate while an approved MCP write is in progress', async () => {
+    const adapter = fakeMcp()
+    const originalCall = adapter.callTool.bind(adapter)
+    let notifyWriteStarted!: () => void
+    let releaseWrite!: () => void
+    const writeStarted = new Promise<void>((resolve) => { notifyWriteStarted = resolve })
+    const writeGate = new Promise<void>((resolve) => { releaseWrite = resolve })
+    const call = vi.spyOn(adapter, 'callTool').mockImplementation(async (name, args) => {
+      if (name === 'update_ticket_priority') {
+        notifyWriteStarted()
+        await writeGate
+      }
+      return originalCall(name, args)
+    })
+    const app = testApp({ ollamaAdapter: fakeOllama() }, adapter)
+    const started = await request(app).post('/api/workflows').send({ input: workflowInput, action: update }).expect(201)
+    const approvalId = started.body.approval.id as string
+    await request(app).post(`/api/approvals/${approvalId}/decision`).send({ decision: 'approve' }).expect(200)
+
+    const firstExecution = request(app).post('/api/actions/execute').send({ approvalId }).then((response) => response)
+    await writeStarted
+    const duplicate = await request(app).post('/api/actions/execute').send({ approvalId }).expect(409)
+    expect(duplicate.body.approval.status).toBe('executing')
+    expect(call.mock.calls.filter(([name]) => name === 'update_ticket_priority')).toHaveLength(1)
+
+    releaseWrite()
+    const execution = await firstExecution
+    expect(execution.status).toBe(200)
+    expect(execution.body).toMatchObject({ executed: true, approval: { status: 'executed' } })
+    expect(call.mock.calls.filter(([name]) => name === 'update_ticket_priority')).toHaveLength(1)
+  })
 })
