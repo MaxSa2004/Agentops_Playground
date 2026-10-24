@@ -2,5 +2,15 @@
   "name": "@agentops/mcp-server",
   "private": true,
   "version": "0.1.0",
-  "scripts": { "dev": "echo 'MCP server implementation is planned for a later phase.'" }
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc --noEmit -p tsconfig.json",
+    "start": "tsx src/server.ts"
+  },
+  "dependencies": {
+    "@agentops/core": "^0.1.0",
+    "@modelcontextprotocol/server": "^2.4.0",
+    "zod": "^4.6.7"
+  }
 }

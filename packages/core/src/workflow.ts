@@ -20,7 +20,7 @@ export type WorkflowEventType =
   | 'demo_action_illustrated'
   | 'workflow_completed'
 
-export type WorkflowEventOrigin = 'workflow' | 'decision-simulator' | 'mcp-demo' | 'policy-preview' | 'policy-engine' | 'human' | 'api' | 'browser-demo'
+export type WorkflowEventOrigin = 'workflow' | 'decision-simulator' | 'mcp-demo' | 'mcp-client' | 'ollama' | 'policy-preview' | 'policy-engine' | 'human' | 'api' | 'browser-demo'
 
 export interface WorkflowEvent {
   id: string
@@ -56,7 +56,7 @@ export function validateWorkflowInput(value: unknown): WorkflowInput {
 export function runTriageWorkflow(
   value: unknown,
   now: () => Date = () => new Date(),
-  options: { deferFinalEvent?: boolean } = {},
+  options: { deferFinalEvent?: boolean; liveMcp?: boolean } = {},
 ): WorkflowResult {
   const input = validateWorkflowInput(value)
   const events: WorkflowEvent[] = []
@@ -73,8 +73,13 @@ export function runTriageWorkflow(
     urgent: decisions.urgency.value,
     severity: decisions.severity.value,
   })
+  const ticket = options.liveMcp ? undefined : DEMO_TICKETS.find((candidate) => candidate.id === input.ticketId)
+
+  if (options.liveMcp) {
+    return { status: 'completed', input, decisions, recommendation: 'Waiting for the live MCP tool result.', events }
+  }
+
   record('tool_requested', 'mcp-demo', 'Demonstration MCP request: get_ticket.', { tool: 'get_ticket', ticketId: input.ticketId, simulated: true })
-  const ticket = DEMO_TICKETS.find((candidate) => candidate.id === input.ticketId)
 
   if (!ticket) {
     record('tool_result', 'mcp-demo', `No demonstration ticket found for ${input.ticketId}.`, { found: false })

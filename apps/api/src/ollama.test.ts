@@ -121,4 +121,13 @@ describe('local Ollama adapter', () => {
     const adapter = createOllamaAdapter({ fetcher: async () => new Response(JSON.stringify({ model: 'qwen2.5:1.5b', done: false, message: { content: '{}' } }), { status: 200 }) })
     await expect(adapter.generateTriage(context)).rejects.toBeInstanceOf(OllamaError)
   })
+
+  it('parses structured tool selections and rejects malformed selections', async () => {
+    const adapter = createOllamaAdapter({ fetcher: async () => ollamaResponse({ tool: 'get_ticket', arguments: { ticketId: 'TK-2048' } }) })
+    await expect(adapter.selectReadTool({ request: 'Find the ticket', ticketId: 'TK-2048', tools: [] })).resolves.toEqual({ tool: 'get_ticket', arguments: { ticketId: 'TK-2048' } })
+    const malformed = createOllamaAdapter({ fetcher: async () => ollamaResponse({ tool: 'get_ticket', arguments: [], extra: true }) })
+    await expect(malformed.selectReadTool({ request: 'Find the ticket', ticketId: 'TK-2048', tools: [] })).rejects.toMatchObject({ code: 'INVALID_MODEL_OUTPUT' })
+    const badJson = createOllamaAdapter({ fetcher: async () => new Response(JSON.stringify({ model: 'qwen2.5:1.5b', done: true, message: { content: 'not json' } }), { status: 200 }) })
+    await expect(badJson.selectReadTool({ request: 'Find ticket', ticketId: 'TK-2048', tools: [] })).rejects.toMatchObject({ code: 'INVALID_MODEL_OUTPUT' })
+  })
 })

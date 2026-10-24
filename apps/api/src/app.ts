@@ -1,8 +1,8 @@
 import { randomUUID } from 'node:crypto'
-import express, { type ErrorRequestHandler } from 'express'
-import { evaluatePolicy, parseProposedAction, runTriageWorkflow, type GeneratedTriageAssessment, type PolicyDecision, type ProposedAction, type WorkflowEvent, type WorkflowInput, type WorkflowResult } from '@agentops/core'
-import { DEMO_TICKETS } from '@agentops/core'
+import express, { type ErrorRequestHandler, type Response } from 'express'
+import { evaluatePolicy, parseProposedAction, runTriageWorkflow, type DemoTicket, type GeneratedTriageAssessment, type PolicyDecision, type ProposedAction, type WorkflowEvent, type WorkflowInput, type WorkflowResult } from '@agentops/core'
 import { createOllamaAdapter, OllamaError, type OllamaAdapter } from './ollama'
+import { createMcpClientAdapter, McpClientError, validateJsonSchema, type DiscoveredMcpTool, type McpAdapter } from './mcp-client'
 
 export type ApprovalStatus = 'pending' | 'approved' | 'rejected' | 'blocked' | 'executed'
 
@@ -45,17 +45,9 @@ export interface WorkflowRunRecord {
   events: ApiEvent[]
 }
 
-interface TicketRecord {
-  id: string
-  subject: string
-  status: string
-  priority: string
-}
-
 export interface ApiState {
   approvals: Map<string, ApprovalRecord>
   workflows: Map<string, WorkflowRunRecord>
-  tickets: Map<string, TicketRecord>
   events: ApiEvent[]
 }
 
@@ -64,15 +56,13 @@ export interface AppOptions {
   state?: ApiState
   now?: () => Date
   ollamaAdapter?: OllamaAdapter
+  mcpAdapter?: McpAdapter
 }
 
 export function createApiState(): ApiState {
   return {
     approvals: new Map(),
     workflows: new Map(),
-    tickets: new Map(DEMO_TICKETS.map((ticket) => [ticket.id, {
-      id: ticket.id, subject: ticket.subject, status: ticket.status, priority: 'normal',
-    }])),
     events: [],
   }
 }
@@ -82,10 +72,11 @@ export function createApp(options: AppOptions = {}) {
   const state = options.state ?? createApiState()
   const evaluator = options.policyEvaluator ?? evaluatePolicy
   const ollama = options.ollamaAdapter ?? createOllamaAdapter()
+  const mcp = options.mcpAdapter ?? createMcpClientAdapter()
   const now = options.now ?? (() => new Date())
   const timestamp = () => now().toISOString()
-  const recordEvent = (type: string, message: string, approvalId?: string, workflowId?: string) => {
-    const event = { id: randomUUID(), type, timestamp: timestamp(), message, ...(approvalId ? { approvalId } : {}), ...(workflowId ? { workflowId } : {}) }
+  const recordEvent = (type: string, message: string, approvalId?: string, workflowId?: string, origin = 'api', data?: Record<string, unknown>) => {
+    const event = { id: randomUUID(), type, timestamp: timestamp(), message, origin, ...(approvalId ? { approvalId } : {}), ...(workflowId ? { workflowId } : {}), ...(data ? { data } : {}) }
     state.events.push(event)
     return event
   }
@@ -103,12 +94,26 @@ export function createApp(options: AppOptions = {}) {
     run.status = status
     appendWorkflowEvent(run, 'workflow_completed', message, { status })
   }
+  const failWorkflow = (run: WorkflowRunRecord, response: Response, error: unknown, completionMessage: string) => {
+    const mcpError = error instanceof McpClientError ? error : undefined
+    const ollamaError = error instanceof OllamaError ? error : undefined
+    appendWorkflowEvent(run, ollamaError ? 'ollama_error' : 'mcp_workflow_error', errorMessage(error), { code: ollamaError?.code ?? mcpError?.code ?? 'MCP_WORKFLOW_ERROR' }, undefined, ollamaError ? 'ollama' : 'mcp-client')
+    completeWorkflow(run, 'failed', completionMessage)
+    return response.status(ollamaError?.httpStatus ?? (mcpError?.code === 'MCP_INVALID_ARGUMENTS' ? 400 : 503)).json({
+      error: errorMessage(error), code: ollamaError?.code ?? mcpError?.code ?? 'MCP_WORKFLOW_ERROR', workflowId: run.id, workflow: publicWorkflow(run), triage: run.triage,
+    })
+  }
 
   app.use(express.json({ limit: '16kb' }))
 
   app.get('/api/health', async (_request, response) => {
     const ollamaStatus = await ollama.status()
-    return response.json({ status: 'ok', mode: 'local-api', ollama: ollamaStatus })
+    return response.json({ status: 'ok', mode: 'local-api', ollama: ollamaStatus, mcp: mcp.status() })
+  })
+
+  app.get('/api/mcp/tools', async (_request, response) => {
+    try { return response.json({ tools: await mcp.listTools(), source: 'mcp-server' }) }
+    catch (error) { return response.status(503).json({ error: errorMessage(error), code: error instanceof McpClientError ? error.code : 'MCP_UNAVAILABLE' }) }
   })
 
   app.post('/api/workflows', async (request, response) => {
@@ -118,7 +123,7 @@ export function createApp(options: AppOptions = {}) {
     let triage: WorkflowResult
     let action: ProposedAction | { type: 'unknown'; operation: string }
     try {
-      triage = runTriageWorkflow(request.body.input, now, { deferFinalEvent: true })
+      triage = runTriageWorkflow(request.body.input, now, { deferFinalEvent: true, liveMcp: true })
       action = parseProposedAction(request.body.action)
     } catch (error) {
       return response.status(400).json({ error: errorMessage(error) })
@@ -142,13 +147,65 @@ export function createApp(options: AppOptions = {}) {
     state.workflows.set(id, run)
     state.events.push(...initialEvents)
 
-    appendWorkflowEvent(run, 'ollama_request_started', `Requesting a local assessment from ${ollama.model}.`, { model: ollama.model }, undefined, 'ollama')
+    let discovered: DiscoveredMcpTool[]
     try {
-      const storedTicket = triage.ticket ? state.tickets.get(triage.ticket.id) : undefined
+      discovered = await mcp.listTools()
+      appendWorkflowEvent(run, 'mcp_connection_established', 'Connected to the persistent MCP server process.', { tools: discovered.length }, undefined, 'mcp-client')
+      appendWorkflowEvent(run, 'mcp_tools_discovered', `Discovered ${discovered.length} MCP tools from the server.`, { tools: discovered.map((tool) => tool.name) }, undefined, 'mcp-client')
+    } catch (error) {
+      return failWorkflow(run, response, error, 'The MCP server could not be reached; no simulated data was substituted.')
+    }
+
+    const readTools = discovered.filter((tool) => ['get_ticket', 'list_tickets', 'search_knowledge_base'].includes(tool.name) && tool.annotations?.readOnlyHint === true)
+    let selected: { name: string; args: Record<string, unknown> } | undefined
+    let selectionError = ''
+    for (let attempt = 0; attempt < 2 && !selected; attempt += 1) {
+      appendWorkflowEvent(run, 'ollama_tool_selection_started', `Asking ${ollama.model} to select one discovered read-only MCP tool${attempt ? ' (correction attempt)' : ''}.`, { attempt: attempt + 1, tools: readTools.map((tool) => tool.name) }, undefined, 'ollama')
+      try {
+        const candidate = await ollama.selectReadTool({
+          request: triage.input.request,
+          ticketId: triage.input.ticketId,
+          tools: readTools,
+          ...(attempt ? { correction: `The previous selection was invalid: ${selectionError}. Select a valid discovered read-only tool and arguments.` } : {}),
+        })
+        const tool = readTools.find((entry) => entry.name === candidate.tool)
+        if (!tool) throw new Error(`Selected tool "${candidate.tool}" is not an available discovered read-only tool.`)
+        validateJsonSchema(tool.inputSchema, candidate.arguments)
+        validateSelectionArguments(tool, candidate.arguments, triage.input.ticketId)
+        selected = { name: tool.name, args: candidate.arguments }
+        appendWorkflowEvent(run, 'mcp_arguments_validated', `Validated arguments for ${tool.name}.`, { tool: tool.name, arguments: candidate.arguments }, undefined, 'mcp-client')
+      } catch (error) {
+        if (error instanceof OllamaError && !['INVALID_MODEL_OUTPUT', 'MALFORMED_RESPONSE'].includes(error.code)) {
+          return failWorkflow(run, response, error, 'Workflow stopped because local tool selection failed.')
+        }
+        selectionError = errorMessage(error)
+        appendWorkflowEvent(run, 'ollama_tool_selection_invalid', `Tool selection attempt ${attempt + 1} was rejected: ${selectionError}`, { attempt: attempt + 1 }, undefined, 'ollama')
+      }
+    }
+    if (!selected) return failWorkflow(run, response, new Error(`The model could not produce a valid read-only MCP tool request after one correction: ${selectionError}`), 'Workflow stopped safely; no MCP call or policy action was executed.')
+
+    let retrieved: unknown
+    try {
+      appendWorkflowEvent(run, 'tool_requested', `Invoking discovered MCP tool ${selected.name}.`, { tool: selected.name, arguments: selected.args }, undefined, 'mcp-client')
+      const toolResult = await mcp.callTool(selected.name, selected.args)
+      retrieved = extractToolValue(toolResult)
+      if (selected.name === 'get_ticket') {
+        if (!isRecord(retrieved) || !isRecord(retrieved.ticket)) throw new Error('MCP get_ticket did not return a ticket object.')
+        triage.ticket = normalizeTicket(retrieved.ticket, triage.input.ticketId)
+      }
+      appendWorkflowEvent(run, 'tool_result', `MCP tool ${selected.name} returned successfully.`, { tool: selected.name, resultStatus: 'success' }, undefined, 'mcp-server')
+    } catch (error) {
+      appendWorkflowEvent(run, 'mcp_tool_failed', `MCP tool ${selected.name} failed: ${errorMessage(error)}`, { tool: selected.name, code: error instanceof McpClientError ? error.code : 'MCP_TOOL_ERROR' }, undefined, 'mcp-server')
+      return failWorkflow(run, response, error, 'Workflow stopped without substituting demonstration tool results.')
+    }
+
+    appendWorkflowEvent(run, 'ollama_request_started', `Requesting a local assessment from ${ollama.model} using the actual MCP result.`, { model: ollama.model, tool: selected.name }, undefined, 'ollama')
+    try {
       run.assessment = await ollama.generateTriage({
         request: triage.input.request,
         ticket: triage.ticket ? structuredClone(triage.ticket) : null,
-        ...(storedTicket ? { ticketPriority: storedTicket.priority } : {}),
+        toolName: selected.name,
+        toolResult: retrieved,
         decisions: triage.decisions,
       })
       appendWorkflowEvent(run, 'ollama_response_received', `Received a structured assessment from ${run.assessment.model}.`, {
@@ -193,15 +250,15 @@ export function createApp(options: AppOptions = {}) {
     }
 
     try {
-      const result = executeAction(state, action as ProposedAction)
+      const result = await executeMcpAction(mcp, action as ProposedAction, (type, message, data) => appendWorkflowEvent(run, type, message, data, undefined, type === 'tool_result' ? 'mcp-server' : 'mcp-client'))
       run.result = result
-      appendWorkflowEvent(run, 'action_executed', `Executed allowed ${(action as ProposedAction).type}.`, { result }, undefined, 'api')
+      appendWorkflowEvent(run, 'action_executed', `Executed allowed ${(action as ProposedAction).type} through the MCP server.`, { result }, undefined, 'mcp-server')
       completeWorkflow(run, 'completed', 'Workflow completed after the allowed action executed successfully.')
       return response.status(200).json({ workflow: publicWorkflow(run), triage, decision, assessment: run.assessment, result, executed: true })
     } catch (error) {
-      appendWorkflowEvent(run, 'action_blocked', errorMessage(error), { outcome: 'BLOCK' }, undefined, 'policy-engine')
-      completeWorkflow(run, 'blocked', 'Workflow completed without execution because the action could not be applied.')
-      return response.status(409).json({ workflow: publicWorkflow(run), triage, decision, assessment: run.assessment, error: errorMessage(error), executed: false })
+      appendWorkflowEvent(run, 'mcp_tool_failed', errorMessage(error), { code: error instanceof McpClientError ? error.code : 'MCP_TOOL_ERROR' }, undefined, 'mcp-server')
+      completeWorkflow(run, 'failed', 'Workflow completed without execution because the MCP action failed.')
+      return response.status(502).json({ workflow: publicWorkflow(run), triage, decision, assessment: run.assessment, error: errorMessage(error), executed: false })
     }
   })
 
@@ -289,6 +346,8 @@ export function createApp(options: AppOptions = {}) {
     record.decision = structuredClone(currentDecision)
     const approvalWorkflow = record.workflowId ? state.workflows.get(record.workflowId) : undefined
     if (approvalWorkflow) approvalWorkflow.policyDecision = structuredClone(currentDecision)
+    if (approvalWorkflow) appendWorkflowEvent(approvalWorkflow, 'policy_evaluated', `${currentDecision.outcome}: ${currentDecision.reason}`, { outcome: currentDecision.outcome, reason: currentDecision.reason, phase: 'approval_revalidation' }, record.id, 'policy-engine')
+    else recordEvent('policy_evaluated', `${currentDecision.outcome}: ${currentDecision.reason}`, record.id, undefined, 'policy-engine', { outcome: currentDecision.outcome, reason: currentDecision.reason, phase: 'approval_revalidation' })
     if (currentDecision.outcome === 'BLOCK') {
       record.status = 'blocked'
       record.updatedAt = timestamp()
@@ -320,7 +379,7 @@ export function createApp(options: AppOptions = {}) {
     return response.json({ approval: publicApproval(record), executed: false, ...(run ? { workflow: publicWorkflow(run) } : {}) })
   })
 
-  app.post('/api/actions/execute', (request, response) => {
+  app.post('/api/actions/execute', async (request, response) => {
     if (!isPlainObject(request.body)) return response.status(400).json({ error: 'Body must be an object.' })
 
     if (hasOnlyKeys(request.body, ['approvalId']) && typeof request.body.approvalId === 'string') {
@@ -334,6 +393,8 @@ export function createApp(options: AppOptions = {}) {
       record.decision = structuredClone(currentDecision)
       const executionWorkflow = record.workflowId ? state.workflows.get(record.workflowId) : undefined
       if (executionWorkflow) executionWorkflow.policyDecision = structuredClone(currentDecision)
+      if (executionWorkflow) appendWorkflowEvent(executionWorkflow, 'policy_evaluated', `${currentDecision.outcome}: ${currentDecision.reason}`, { outcome: currentDecision.outcome, reason: currentDecision.reason, phase: 'execution_revalidation' }, record.id, 'policy-engine')
+      else recordEvent('policy_evaluated', `${currentDecision.outcome}: ${currentDecision.reason}`, record.id, undefined, 'policy-engine', { outcome: currentDecision.outcome, reason: currentDecision.reason, phase: 'execution_revalidation' })
       if (currentDecision.outcome === 'BLOCK') {
         record.status = 'blocked'
         record.updatedAt = timestamp()
@@ -349,13 +410,15 @@ export function createApp(options: AppOptions = {}) {
       }
       const run = record.workflowId ? state.workflows.get(record.workflowId) : undefined
       try {
-        const result = executeAction(state, record.action)
+        const result = await executeMcpAction(mcp, record.action, (type, message, data) => {
+          if (run) appendWorkflowEvent(run, type, message, data, record.id, type === 'tool_result' ? 'mcp-server' : 'mcp-client')
+        })
         record.status = 'executed'
         record.updatedAt = timestamp()
         record.result = result
         if (run) {
           run.result = result
-          appendWorkflowEvent(run, 'action_executed', `Executed approved ${record.action.type}.`, { result }, record.id, 'api')
+          appendWorkflowEvent(run, 'action_executed', `Executed approved ${record.action.type} through the MCP server.`, { result }, record.id, 'mcp-server')
           completeWorkflow(run, 'completed', 'Workflow completed after approval and successful execution.')
         } else recordEvent('action_executed', `Executed approved ${record.action.type}.`, record.id)
         return response.json({ approval: publicApproval(record), result, executed: true, ...(run ? { workflow: publicWorkflow(run) } : {}) })
@@ -363,10 +426,10 @@ export function createApp(options: AppOptions = {}) {
         record.status = 'blocked'
         record.updatedAt = timestamp()
         if (run) {
-          appendWorkflowEvent(run, 'action_blocked', errorMessage(error), { outcome: 'BLOCK' }, record.id, 'policy-engine')
-          completeWorkflow(run, 'blocked', 'Workflow completed without execution because the approved action could not be applied.')
-        }
-        return response.status(409).json({ error: errorMessage(error), approval: publicApproval(record), executed: false, ...(run ? { workflow: publicWorkflow(run) } : {}) })
+          appendWorkflowEvent(run, 'mcp_tool_failed', errorMessage(error), { code: error instanceof McpClientError ? error.code : 'MCP_TOOL_ERROR' }, record.id, 'mcp-server')
+          completeWorkflow(run, 'failed', 'Workflow completed without execution because the MCP write failed.')
+        } else recordEvent('mcp_tool_failed', errorMessage(error), record.id)
+        return response.status(502).json({ error: errorMessage(error), approval: publicApproval(record), executed: false, ...(run ? { workflow: publicWorkflow(run) } : {}) })
       }
     }
 
@@ -388,7 +451,9 @@ export function createApp(options: AppOptions = {}) {
     recordEvent('policy_evaluated', `${decision.outcome}: ${decision.reason}`)
     if (decision.outcome === 'BLOCK') return response.status(403).json({ decision, executed: false })
     if (decision.outcome === 'REQUIRE_APPROVAL') return response.status(409).json({ decision, error: 'Create and approve a pending request before executing this action.', executed: false })
-    const result = executeAction(state, action)
+    let result: unknown
+    try { result = await executeMcpAction(mcp, action, (type, message) => recordEvent(type, message)) }
+    catch (error) { return response.status(502).json({ decision, error: errorMessage(error), executed: false }) }
     recordEvent('action_executed', `Executed allowed ${action.type}.`)
     return response.json({ decision, result, executed: true })
   })
@@ -403,28 +468,43 @@ export function createApp(options: AppOptions = {}) {
   return app
 }
 
-function executeAction(state: ApiState, action: ProposedAction): unknown {
+async function executeMcpAction(mcp: McpAdapter, action: ProposedAction, record: (type: string, message: string, data?: Record<string, unknown>) => void): Promise<unknown> {
+  let name: string
+  let args: Record<string, unknown>
   if (action.type === 'read_ticket') {
-    const ticket = state.tickets.get(action.ticketId)
-    if (!ticket) throw new Error('Ticket no longer exists.')
-    return { ticket: { ...ticket } }
+    name = 'get_ticket'; args = { ticketId: action.ticketId }
+  } else if (action.type === 'search_knowledge_base') {
+    name = 'search_knowledge_base'; args = { query: action.query }
+  } else if (action.type === 'update_ticket_priority') {
+    name = 'update_ticket_priority'; args = { ticketId: action.ticketId, priority: action.priority }
+  } else {
+    throw new Error('Blocked actions cannot be executed.')
   }
-  if (action.type === 'search_knowledge_base') {
-    const entries = [
-      { title: 'Late delivery refunds', text: 'Review order history and offer the applicable refund option.' },
-      { title: 'Account recovery', text: 'Use the verified account recovery steps; never request a password.' },
-      { title: 'Damaged items', text: 'Record damage details and route replacement questions to shipping.' },
-    ]
-    const query = action.query.toLowerCase()
-    return { results: entries.filter((entry) => `${entry.title} ${entry.text}`.toLowerCase().includes(query.split(' ')[0])).slice(0, 3) }
+  record('tool_requested', `Invoking MCP tool ${name} after policy authorization.`, { tool: name, arguments: args })
+  const response = await mcp.callTool(name, args)
+  const value = extractToolValue(response)
+  record('tool_result', `MCP tool ${name} returned successfully.`, { tool: name, resultStatus: 'success' })
+  return value
+}
+
+function validateSelectionArguments(tool: DiscoveredMcpTool, args: Record<string, unknown>, ticketId: string): void {
+  if (tool.name === 'get_ticket' && (Object.keys(args).length !== 1 || args.ticketId !== ticketId)) throw new Error('get_ticket must use only the workflow ticketId.')
+  if (tool.name === 'list_tickets' && Object.keys(args).length !== 0) throw new Error('list_tickets takes no arguments.')
+  if (tool.name === 'search_knowledge_base' && (Object.keys(args).length !== 1 || typeof args.query !== 'string' || args.query.trim().length < 2 || args.query.length > 200)) throw new Error('search_knowledge_base requires only a query of 2 to 200 characters.')
+}
+
+function extractToolValue(result: { structuredContent?: unknown; content: Array<{ type: string; text?: string }> }): unknown {
+  if (result.structuredContent !== undefined) return result.structuredContent
+  const text = result.content.find((item) => item.type === 'text')?.text
+  if (!text) throw new Error('MCP tool returned no structured or text result.')
+  try { return JSON.parse(text) as unknown } catch { return { text } }
+}
+
+function normalizeTicket(value: Record<string, unknown>, expectedId: string): DemoTicket {
+  if (value.id !== expectedId || typeof value.subject !== 'string' || !['refund', 'account_access', 'damaged_delivery', 'general'].includes(String(value.issueType)) || !['single_customer', 'multiple_customers', 'business_blocking'].includes(String(value.customerImpact)) || typeof value.daysWaiting !== 'number' || !Number.isInteger(value.daysWaiting) || value.daysWaiting < 0 || value.daysWaiting > 60 || (value.status !== 'open' && value.status !== 'pending')) {
+    throw new Error('MCP get_ticket returned a ticket that did not match the expected demonstration shape.')
   }
-  if (action.type === 'update_ticket_priority') {
-    const ticket = state.tickets.get(action.ticketId)
-    if (!ticket) throw new Error('Ticket no longer exists.')
-    ticket.priority = action.priority
-    return { ticket: { ...ticket } }
-  }
-  throw new Error('Blocked actions cannot be executed.')
+  return value as unknown as DemoTicket
 }
 
 function publicApproval(record: ApprovalRecord): ApprovalRecord {
@@ -449,5 +529,9 @@ function isUuid(value: string): boolean {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : 'Invalid request.'
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 

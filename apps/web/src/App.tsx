@@ -1,10 +1,10 @@
 import { useEffect, useState } from 'react'
 import { runTriageWorkflow, simulateDecisions, type GeneratedTriageAssessment, type ProposedAction, type WorkflowInput } from '@agentops/core'
 import {
-  Activity, ArrowDownRight, ArrowUpRight, BadgeCheck, Boxes, BrainCircuit,
-  Check, ChevronDown, CircleHelp, Clock3, Command, Database, FileText, Gauge,
+  Activity, ArrowDownRight, ArrowRight, ArrowUpRight, BadgeCheck, Boxes, BrainCircuit,
+  Check, ChevronDown, CircleHelp, Clock3, Command, Cpu, Database, FileText, Gauge,
   GitBranch, LayoutDashboard, LockKeyhole, Menu, MoreHorizontal,
-  Play, Plus, Search, Settings2, Shield, ShieldAlert, Sparkles, WandSparkles,
+  Play, Plus, Search, Server, Settings2, Shield, ShieldAlert, Sparkles, WandSparkles,
   X,
 } from 'lucide-react'
 
@@ -14,10 +14,19 @@ type PolicyView = { outcome: 'ALLOW' | 'BLOCK' | 'REQUIRE_APPROVAL'; reason: str
 type ApprovalView = { id?: string; status: 'pending' | 'approved' | 'rejected' | 'blocked' | 'executed' | 'demo_only' }
 type ApiEventView = { id: string; type: string; timestamp: string; message: string; workflowId?: string; origin?: string; data?: Record<string, unknown> }
 type OllamaStatusView = { available: boolean; model: string; modelAvailable: boolean; message?: string }
+type McpToolView = { name: string; description?: string; inputSchema: Record<string, unknown>; annotations?: Record<string, unknown> }
 const scenarios: Scenario[] = [
   { label: 'Refund request', input: { ticketId: 'TK-2048', request: 'Analyse this customer’s refund request, retrieve the support ticket, determine urgency, and recommend the next action.', issueType: 'refund', customerImpact: 'single_customer', daysWaiting: 8 } },
   { label: 'Login issue', input: { ticketId: 'TK-1982', request: 'A customer cannot access their account after resetting their password. Find the ticket and recommend a safe next step.', issueType: 'account_access', customerImpact: 'single_customer', daysWaiting: 1 } },
   { label: 'Damaged delivery', input: { ticketId: 'TK-2116', request: 'Review the damaged delivery complaint and determine the right team and recommended action.', issueType: 'damaged_delivery', customerImpact: 'single_customer', daysWaiting: 3 } },
+]
+
+const demoMcpTools: McpToolView[] = [
+  { name: 'list_tickets', description: 'List fictional support tickets', inputSchema: { type: 'object', properties: {} }, annotations: { readOnlyHint: true } },
+  { name: 'get_ticket', description: 'Retrieve a fictional ticket by ID', inputSchema: { ticketId: 'string: TK-0000' }, annotations: { readOnlyHint: true } },
+  { name: 'search_knowledge_base', description: 'Search fictional support documentation', inputSchema: { query: 'string: 2–200 characters' }, annotations: { readOnlyHint: true } },
+  { name: 'propose_ticket_action', description: 'Return a priority proposal without executing it', inputSchema: { ticketId: 'string', priority: 'low | normal | high | urgent' }, annotations: { readOnlyHint: true } },
+  { name: 'update_ticket_priority', description: 'Change a ticket priority after backend authorization', inputSchema: { ticketId: 'string', priority: 'low | normal | high | urgent' }, annotations: { readOnlyHint: false } },
 ]
 
 const timelineTitles: Record<string, string> = {
@@ -26,7 +35,28 @@ const timelineTitles: Record<string, string> = {
   approval_granted: 'Approval granted', approval_rejected: 'Approval rejected', action_executed: 'Action executed',
   action_blocked: 'Action blocked', execution_blocked: 'Execution blocked', demo_action_illustrated: 'Demo action illustrated',
   ollama_request_started: 'Local model request started', ollama_response_received: 'Model assessment received', ollama_error: 'Local model error',
+  mcp_connection_established: 'MCP connection established', mcp_tools_discovered: 'MCP tools discovered',
+  mcp_arguments_validated: 'Tool arguments validated', mcp_tool_failed: 'MCP tool failed', mcp_workflow_error: 'MCP workflow error',
+  ollama_tool_selection_started: 'Model selecting read tool', ollama_tool_selection_invalid: 'Tool selection rejected',
   workflow_completed: 'Workflow completed',
+}
+
+function eventSourceLabel(origin: string | undefined, type: string, backendAvailable: boolean): string {
+  if (origin === 'decision-simulator') return 'JEV-INSPIRED SIMULATION'
+  if (origin === 'mcp-demo') return 'MCP DEMO — SIMULATED'
+  if (origin === 'mcp-client') return 'MCP CLIENT'
+  if (origin === 'mcp-server') return 'MCP SERVER'
+  if (origin === 'policy-engine') return 'POLICY ENGINE'
+  if (origin === 'policy-preview') return 'POLICY DEMO'
+  if (origin === 'human') return 'HUMAN APPROVAL'
+  if (origin === 'ollama') return backendAvailable ? 'OLLAMA AGENT' : 'OLLAMA DEMO — SIMULATED'
+  if (origin === 'browser-demo') {
+    if (type.startsWith('approval_')) return 'HUMAN APPROVAL · DEMO'
+    if (type.startsWith('policy_') || type === 'action_blocked') return 'POLICY DEMO'
+    return 'WORKFLOW DEMO — SIMULATED'
+  }
+  if (origin === 'workflow') return backendAvailable ? 'API / WORKFLOW' : 'WORKFLOW DEMO — SIMULATED'
+  return backendAvailable ? 'API / WORKFLOW' : 'WORKFLOW DEMO — SIMULATED'
 }
 
 function App() {
@@ -42,6 +72,8 @@ function App() {
   const [executionResult, setExecutionResult] = useState('')
   const [backendAvailable, setBackendAvailable] = useState(false)
   const [ollamaStatus, setOllamaStatus] = useState<OllamaStatusView | null>(null)
+  const [mcpTools, setMcpTools] = useState<McpToolView[]>([])
+  const [mcpConnected, setMcpConnected] = useState(false)
   const [runEvents, setRunEvents] = useState<ApiEventView[]>([])
   const [activeNav, setActiveNav] = useState('Overview')
   const [mobileNav, setMobileNav] = useState(false)
@@ -63,10 +95,12 @@ function App() {
         : 'Search the support knowledge base'
 
   useEffect(() => {
-    fetch('/api/health').then((response) => response.ok ? response.json() : null).then((health: { status?: string; mode?: string; ollama?: OllamaStatusView } | null) => {
+    fetch('/api/health').then((response) => response.ok ? response.json() : null).then((health: { status?: string; mode?: string; ollama?: OllamaStatusView; mcp?: { connected: boolean } } | null) => {
       if (health?.status === 'ok' && health?.mode === 'local-api') {
         setBackendAvailable(true)
         setOllamaStatus(health.ollama ?? null)
+        setMcpConnected(Boolean(health.mcp?.connected))
+        void requestApi<{ tools: McpToolView[] }>('/api/mcp/tools', { method: 'GET' }).then((result) => setMcpTools(result.tools)).catch(() => setMcpConnected(false))
       }
     }).catch(() => setBackendAvailable(false))
   }, [])
@@ -172,7 +206,7 @@ function App() {
 
   const eventRows = runEvents.map((event) => ({
     title: timelineTitles[event.type] ?? event.type.replace(/_/g, ' '),
-    source: event.origin === 'decision-simulator' ? 'SIMULATOR' : event.origin === 'mcp-demo' ? 'DEMO MCP' : event.origin === 'policy-preview' ? 'PHASE 3 PREVIEW' : event.origin === 'policy-engine' ? 'POLICY ENGINE' : event.origin === 'human' ? 'HUMAN' : event.origin === 'browser-demo' ? 'BROWSER DEMO' : event.origin === 'workflow' ? 'WORKFLOW' : event.origin === 'ollama' ? 'OLLAMA' : 'API',
+    source: eventSourceLabel(event.origin, event.type, backendAvailable),
     icon: event.type.includes('blocked') ? ShieldAlert : event.type.includes('approval') ? LockKeyhole : event.type.includes('executed') || event.type === 'workflow_completed' ? Check : event.type.startsWith('tool_') ? Database : event.type === 'decisions_generated' ? BrainCircuit : Shield,
     state: (event.type.includes('blocked') || event.type.includes('rejected')) ? 'blocked' as const : event.type === 'approval_requested' ? 'wait' as const : 'done' as const,
     time: new Date(event.timestamp).toLocaleTimeString('en-GB', { hour12: false }), detail: event.message, key: event.id,
@@ -227,6 +261,26 @@ function App() {
             <Metric icon={Boxes} label="MCP tool calls" value="342" change="6.4%" positive detail="across 5 available tools" />
           </section>
 
+          <section className="architecture-section" aria-labelledby="architecture-title">
+            <div className="architecture-heading">
+              <div><div className="eyebrow"><span className="eyebrow-line" /> COMPONENT MAP</div><h2 id="architecture-title">AI Architecture</h2><p>Where each technology operates in the support-triage workflow.</p></div>
+              <span className="architecture-mode">{backendAvailable ? 'LOCAL WORKFLOW' : 'BROWSER DEMONSTRATION'}</span>
+            </div>
+            <div className="architecture-cards">
+              <article className="architecture-card arch-ollama"><div className="architecture-card-top"><span className="architecture-icon"><Cpu size={17} /></span><span className="architecture-index">01</span></div><h3>OLLAMA AGENT</h3><span className="architecture-subtitle">REAL LOCAL GENERATIVE AI</span><p>Runs Qwen2.5 1.5B through Ollama to interpret requests, select tools, and use retrieved information to recommend next steps.</p></article>
+              <article className="architecture-card arch-decision"><div className="architecture-card-top"><span className="architecture-icon"><BrainCircuit size={17} /></span><span className="architecture-index">02</span></div><h3>TYPESAFE / JEV-INSPIRED DECISION SIMULATION</h3><span className="architecture-subtitle">SIMULATED — NOT THE REAL JEV MODEL</span><p>Deterministic Choice-, Noul-, and Score-inspired outputs demonstrate bounded typed decisions. No TypeSafe AI or Jev model is connected.</p></article>
+              <article className="architecture-card arch-mcp"><div className="architecture-card-top"><span className="architecture-icon"><Server size={17} /></span><span className="architecture-index">03</span></div><h3>MCP TOOL INTEGRATION</h3><span className="architecture-subtitle">{backendAvailable ? 'REAL MCP CLIENT + SERVER' : 'MCP DEMO — SIMULATED'}</span><p>{backendAvailable ? 'Discovers tools through the client and invokes them over MCP to retrieve fictional ticket and knowledge-base data or perform authorised demo operations.' : 'Illustrates tool discovery and calls with fictional data. This browser demo is not connected to the local MCP server.'}</p></article>
+              <article className="architecture-card arch-policy"><div className="architecture-card-top"><span className="architecture-icon"><Shield size={17} /></span><span className="architecture-index">04</span></div><h3>DETERMINISTIC POLICY ENGINE</h3><span className="architecture-subtitle">APPLICATION-ENFORCED SAFETY</span><p>Evaluates proposed operations as ALLOW, BLOCK, or REQUIRE_APPROVAL. Backend policy is independent of model output and prevents unapproved execution.</p></article>
+            </div>
+            <div className="architecture-flow-wrap">
+              <div className="architecture-flow-heading"><strong>Conceptual workflow</strong><span>Conceptual order only; runtime sequence can differ. The timeline below shows actual run events.</span></div>
+              <div className="architecture-flow" aria-label="Conceptual flow: User request, Ollama Agent, Jev-inspired Decision Simulation, MCP Client and Server, Ollama assessment, Deterministic Policy Engine, Human Approval if required, Authorised execution">
+                {['User request', 'Ollama Agent', 'Decision simulation', 'MCP Client + Server', 'Ollama assessment', 'Policy engine', 'Human approval · if required', 'Authorised execution'].map((step, index) => <div className="architecture-flow-step" key={step}><span className={`flow-number flow-tone-${index % 4}`}>{index + 1}</span><span>{step}</span>{index < 7 && <ArrowRight className="flow-arrow" size={13} aria-hidden="true" />}</div>)}
+              </div>
+            </div>
+            <div className="architecture-legend" aria-label="Technology legend"><strong>Legend</strong><span><i className="legend-mark real" />Real local AI</span><span><i className="legend-mark simulated" />Simulated typed decisions</span><span><i className="legend-mark mcp" />Actual MCP operations in local mode</span><span><i className="legend-mark policy" />Deterministic policy decisions</span><small>Jev-inspired decisions are a project simulation and are not connected to the actual Jev model.</small></div>
+          </section>
+
           <div className="section-title-row"><div><h2>Agent playground</h2><p>Run a support scenario and inspect each step.</p></div><span className="demo-label"><span className="demo-dot" /> {backendAvailable ? 'LOCAL API · POLICY ENFORCED' : 'BROWSER DEMO · NOT SERVER ENFORCED'}</span></div>
 
           <section className="playground-grid" id="playground">
@@ -237,24 +291,24 @@ function App() {
               <label className="field-label action-label" htmlFor="action-mode">ACTION TO DEMONSTRATE</label><div className="select-wrap"><select id="action-mode" value={actionMode} disabled={approvalPending} onChange={(event) => setActionMode(event.target.value as DemoActionMode)}><option value="allow">Read existing ticket · ALLOW</option><option value="approval">Change ticket priority · REQUIRE APPROVAL</option><option value="block">Delete ticket · BLOCK</option></select><ChevronDown size={15} /></div>
               <div className="request-footer"><span><span className="sim-indicator" /> Deterministic demo · simulated decisions only</span><span>{workflowInput.request.length} / 500</span></div>
               <button className="run-button" onClick={() => void runWorkflow()} disabled={running || approvalPending}>{running ? <><span className="button-spinner" /> Running workflow…</> : approvalPending ? <>Resolve the pending approval</> : <><Play size={15} fill="currentColor" /> Run workflow <span className="button-shortcut">⌘ ↵</span></>}</button>
-              <div className="workflow-mini"><div className="mini-step"><span className="mini-icon icon-ai"><Sparkles size={13} /></span><span>Interpret request</span></div><span className="mini-connector" /><div className="mini-step"><span className="mini-icon icon-decide"><BrainCircuit size={13} /></span><span>Typed decisions</span></div><span className="mini-connector" /><div className="mini-step"><span className="mini-icon icon-tool"><Database size={13} /></span><span>Retrieve ticket</span></div><span className="mini-connector" /><div className="mini-step"><span className="mini-icon icon-policy"><Shield size={13} /></span><span>Check policy</span></div></div>
+              <div className="workflow-mini"><div className="mini-step"><span className="mini-icon icon-ai"><Sparkles size={13} /></span><span>Ollama agent</span></div><span className="mini-connector" /><div className="mini-step"><span className="mini-icon icon-decide"><BrainCircuit size={13} /></span><span>Jev simulation</span></div><span className="mini-connector" /><div className="mini-step"><span className="mini-icon icon-tool"><Database size={13} /></span><span>MCP tools</span></div><span className="mini-connector" /><div className="mini-step"><span className="mini-icon icon-policy"><Shield size={13} /></span><span>Policy engine</span></div></div>
             </article>
 
             <article className="panel timeline-panel" id="timeline"><div className="panel-heading timeline-heading"><div><h3>Execution timeline</h3><p>Observable events from the latest run</p></div><div className="run-status"><span className="status-pulse" /> {runStatusText}</div></div>
-              {eventRows.length ? <div className="timeline">{eventRows.map((event, index) => <div className={`timeline-event ${event.state}`} key={event.key}><div className="timeline-rail"><div className={`event-icon ${event.state}`}><event.icon size={14} /></div>{index < eventRows.length - 1 && <span className="rail-line" />}</div><div className="event-copy"><div className="event-top"><strong>{event.title}</strong><time>{event.time}</time></div><p>{event.detail}</p><span className={`source-tag source-${event.source.toLowerCase().replace(/ /g, '-')}`}>{event.source}</span></div></div>)}</div> : <div className="timeline-empty"><Activity size={17} /><span>Run the workflow to generate observable events.</span></div>}
-              <button className="view-events" onClick={() => setNotice('Timeline entries are deterministic demonstration events.')}>Event origins are labeled <ArrowDownRight size={14} /></button>
+              {eventRows.length ? <div className="timeline">{eventRows.map((event, index) => <div className={`timeline-event ${event.state}`} key={event.key}><div className="timeline-rail"><div className={`event-icon ${event.state}`}><event.icon size={14} /></div>{index < eventRows.length - 1 && <span className="rail-line" />}</div><div className="event-copy"><div className="event-top"><strong>{event.title}</strong><time>{event.time}</time></div><p>{event.detail}</p><span className={`source-tag source-${event.source.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')}`}>{event.source}</span></div></div>)}</div> : <div className="timeline-empty"><Activity size={17} /><span>Run the workflow to generate observable events.</span></div>}
+              <button className="view-events" onClick={() => setNotice(backendAvailable ? 'Timeline sources reflect the local workflow, including actual Ollama and MCP events.' : 'Browser timeline entries are simulated; no Ollama or local MCP calls occurred.')}>Event origins are labeled <ArrowDownRight size={14} /></button>
             </article>
           </section>
 
           <div className="lower-grid">
             <section className="panel decisions-panel" id="decisions"><div className="panel-heading"><div><h3>Decision inspector</h3><p>Bounded outputs with visible sources</p></div><span className="sim-badge"><span className="sim-indicator" /> SIMULATED</span></div>
-              <div className="decision-rows"><DecisionRow icon={BrainCircuit} type="CHOICE · DEPARTMENT" value={previewDecisions.department.value.replace(/_/g, ' ')} source="decision-simulator" tone="violet" /><DecisionRow icon={Activity} type="NOUL · URGENCY" value={previewDecisions.urgency.value ? 'Urgent' : 'Normal'} source="decision-simulator" tone="amber" /><DecisionRow icon={Gauge} type="SCORE · SEVERITY" value={<>{previewDecisions.severity.value}<span className="score-max"> / {previewDecisions.severity.scale.max}</span></>} source="decision-simulator" tone="blue" /></div>
+              <div className="decision-rows"><DecisionRow icon={BrainCircuit} type="CHOICE · DEPARTMENT" value={previewDecisions.department.value.replace(/_/g, ' ')} source="Jev-inspired simulation" tone="violet" /><DecisionRow icon={Activity} type="NOUL · URGENCY" value={previewDecisions.urgency.value ? 'Urgent' : 'Normal'} source="Jev-inspired simulation" tone="amber" /><DecisionRow icon={Gauge} type="SCORE · SEVERITY" value={<>{previewDecisions.severity.value}<span className="score-max"> / {previewDecisions.severity.scale.max}</span></>} source="Jev-inspired simulation" tone="blue" /></div>
               <div className="recommendation"><div className="recommend-icon"><Sparkles size={15} /></div><div className="assessment-copy"><span>{modelAssessment ? `OLLAMA · ${modelAssessment.model} · GENERATED LOCALLY` : backendAvailable ? 'LOCAL MODEL ASSESSMENT' : 'BROWSER DEMO · DETERMINISTIC'}</span>{modelAssessment ? <><p><b>Summary</b> {modelAssessment.summary}</p><p><b>Recommendation</b> {modelAssessment.recommendation}</p><p><b>Explanation</b> {modelAssessment.explanation}</p>{modelAssessment.needsClarification && <p className="clarifying-question"><b>Clarification needed</b> {modelAssessment.clarifyingQuestion}</p>}<small>Generated by local Ollama inference · policy and typed decisions are separate</small></> : backendAvailable ? <><p>{runEvents.some((event) => event.type === 'ollama_error') ? 'The local model did not return an assessment. See the workflow error above.' : 'Run the workflow to request an assessment from the local model.'}</p><small>{ollamaStatus?.message ?? 'No generated result is being shown.'}</small></> : <><p>{workflowResult?.recommendation ?? 'Run the browser demonstration for a deterministic triage recommendation.'}</p><small>Browser demonstration only · not generated by Ollama</small></>}</div></div>
             </section>
 
-            <section className="panel tools-panel" id="tools"><div className="panel-heading"><div><h3>MCP tool explorer</h3><p>Available tools in this workflow</p></div><button className="text-button" onClick={() => setNotice('Tool schemas will be available when the real MCP server is added in a later phase.')}>Explore tools <ArrowUpRight size={14} /></button></div>
-              <div className="tool-list"><ToolRow name="get_ticket" description="Retrieve a support ticket by ID" access="READ" /><ToolRow name="search_knowledge_base" description="Search support documentation" access="READ" /><ToolRow name="update_ticket_priority" description="Change a ticket priority" access="APPROVAL" /></div>
-              <div className="mcp-foot"><span className="mcp-mark">M</span><span>Illustrative MCP tools</span><span className="tool-foot-right">5 tools available <ArrowUpRight size={12} /></span></div>
+            <section className="panel tools-panel" id="tools"><div className="panel-heading"><div><h3>MCP tool explorer</h3><p>{mcpConnected ? 'Tool definitions discovered from the local server' : 'Demonstration definitions · no local MCP connection'}</p></div><button className="text-button" onClick={() => setNotice(mcpConnected ? `Discovered ${mcpTools.length} tools over the local MCP protocol.` : 'Browser demo tool definitions are illustrative only.')}>Explore tools <ArrowUpRight size={14} /></button></div>
+              <div className="tool-list">{(mcpConnected ? mcpTools : demoMcpTools).map((tool) => <ToolRow key={tool.name} name={tool.name} description={tool.description ?? 'MCP tool'} access={tool.annotations?.readOnlyHint === false ? 'WRITE · POLICY' : 'READ'} schema={tool.inputSchema} />)}</div>
+              <div className="mcp-foot"><span className="mcp-mark">M</span><span>{mcpConnected ? 'Actual MCP client · stdio transport' : 'Illustrative MCP definitions'}</span><span className="tool-foot-right">{(mcpConnected ? mcpTools : demoMcpTools).length} tools <ArrowUpRight size={12} /></span></div>
             </section>
           </div>
 
@@ -292,8 +346,8 @@ function DecisionRow({ icon: Icon, type, value, source, tone }: { icon: typeof A
   return <div className="decision-row"><div className={`decision-icon ${tone}`}><Icon size={15} /></div><div className="decision-main"><span>{type}</span><strong>{value}</strong></div><div className="decision-source"><span className="origin-dot" />{source}</div></div>
 }
 
-function ToolRow({ name, description, access }: { name: string; description: string; access: string }) {
-  return <div className="tool-row"><div className="tool-code-icon"><FileText size={14} /></div><div className="tool-info"><strong>{name}</strong><span>{description}</span></div><span className={`access-tag ${access.toLowerCase()}`}>{access}</span></div>
+function ToolRow({ name, description, access, schema }: { name: string; description: string; access: string; schema: Record<string, unknown> }) {
+  return <div className="tool-row"><div className="tool-code-icon"><FileText size={14} /></div><div className="tool-info"><strong>{name}</strong><span>{description}</span><details><summary>Input schema</summary><code>{JSON.stringify(schema)}</code></details></div><span className={`access-tag ${access.toLowerCase().startsWith('write') ? 'approval' : 'read'}`}>{access}</span></div>
 }
 
 export default App
