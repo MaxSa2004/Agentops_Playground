@@ -1,4 +1,5 @@
 import { simulateDecisions, validateDecisionInput, type DecisionInput, type TriageDecisions } from './decision-simulator'
+import { DEMO_TICKETS, type DemoTicket } from './demo-data'
 
 export interface WorkflowInput extends DecisionInput {
   ticketId: string
@@ -11,9 +12,15 @@ export type WorkflowEventType =
   | 'tool_requested'
   | 'tool_result'
   | 'policy_evaluated'
+  | 'approval_requested'
+  | 'approval_granted'
+  | 'approval_rejected'
+  | 'action_executed'
+  | 'action_blocked'
+  | 'demo_action_illustrated'
   | 'workflow_completed'
 
-export type WorkflowEventOrigin = 'workflow' | 'decision-simulator' | 'mcp-demo' | 'policy-preview'
+export type WorkflowEventOrigin = 'workflow' | 'decision-simulator' | 'mcp-demo' | 'policy-preview' | 'policy-engine' | 'human' | 'api' | 'browser-demo'
 
 export interface WorkflowEvent {
   id: string
@@ -24,15 +31,6 @@ export interface WorkflowEvent {
   data?: Record<string, unknown>
 }
 
-export interface DemoTicket {
-  id: string
-  subject: string
-  issueType: WorkflowInput['issueType']
-  customerImpact: WorkflowInput['customerImpact']
-  daysWaiting: number
-  status: 'open' | 'pending'
-}
-
 export interface WorkflowResult {
   status: 'completed' | 'ticket_not_found'
   input: WorkflowInput
@@ -41,12 +39,6 @@ export interface WorkflowResult {
   recommendation: string
   events: WorkflowEvent[]
 }
-
-export const DEMO_TICKETS: readonly DemoTicket[] = [
-  { id: 'TK-2048', subject: 'Refund request after delayed delivery', issueType: 'refund', customerImpact: 'single_customer', daysWaiting: 8, status: 'open' },
-  { id: 'TK-1982', subject: 'Unable to access account after password reset', issueType: 'account_access', customerImpact: 'single_customer', daysWaiting: 1, status: 'pending' },
-  { id: 'TK-2116', subject: 'Item arrived damaged and replacement is delayed', issueType: 'damaged_delivery', customerImpact: 'single_customer', daysWaiting: 3, status: 'open' },
-]
 
 export function validateWorkflowInput(value: unknown): WorkflowInput {
   if (typeof value !== 'object' || value === null) throw new Error('Workflow input must be an object.')
@@ -61,7 +53,11 @@ export function validateWorkflowInput(value: unknown): WorkflowInput {
   return { ticketId: input.ticketId, request: input.request.trim(), ...decisionsInput }
 }
 
-export function runTriageWorkflow(value: unknown, now: () => Date = () => new Date()): WorkflowResult {
+export function runTriageWorkflow(
+  value: unknown,
+  now: () => Date = () => new Date(),
+  options: { deferFinalEvent?: boolean } = {},
+): WorkflowResult {
   const input = validateWorkflowInput(value)
   const events: WorkflowEvent[] = []
   let sequence = 0
@@ -82,16 +78,18 @@ export function runTriageWorkflow(value: unknown, now: () => Date = () => new Da
 
   if (!ticket) {
     record('tool_result', 'mcp-demo', `No demonstration ticket found for ${input.ticketId}.`, { found: false })
-    record('policy_evaluated', 'policy-preview', 'Policy evaluation is reserved for Phase 3.', { status: 'not_implemented' })
-    record('workflow_completed', 'workflow', 'Workflow completed with a missing-ticket result.', { status: 'ticket_not_found' })
+    if (!options.deferFinalEvent) {
+      record('policy_evaluated', 'policy-preview', 'Policy evaluation is reserved for Phase 3.', { status: 'not_implemented' })
+      record('workflow_completed', 'workflow', 'Workflow completed with a missing-ticket result.', { status: 'ticket_not_found' })
+    }
     return { status: 'ticket_not_found', input, decisions, recommendation: 'No matching demonstration ticket was found. Check the ticket ID before taking action.', events }
   }
 
   record('tool_result', 'mcp-demo', `Retrieved ${ticket.id}: ${ticket.subject}.`, { found: true, ticketId: ticket.id, simulated: true })
-  record('policy_evaluated', 'policy-preview', 'Policy evaluation is reserved for Phase 3; no action was executed.', { status: 'not_implemented' })
+  if (!options.deferFinalEvent) record('policy_evaluated', 'policy-preview', 'Policy evaluation is reserved for Phase 3; no action was executed.', { status: 'not_implemented' })
   const urgencyText = decisions.urgency.value ? 'prioritize a timely follow-up' : 'continue with the standard response queue'
   const recommendation = `Route to ${formatDepartment(decisions.department.value)}, ${urgencyText}, and review the ticket history before taking action.`
-  record('workflow_completed', 'workflow', 'Triage demonstration completed; no ticket data was changed.', { status: 'completed' })
+  if (!options.deferFinalEvent) record('workflow_completed', 'workflow', 'Triage demonstration completed; no ticket data was changed.', { status: 'completed' })
   return { status: 'completed', input, decisions, ticket, recommendation, events }
 }
 

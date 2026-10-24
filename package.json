@@ -5,7 +5,8 @@
   "workspaces": ["apps/*", "packages/*"],
   "scripts": {
     "dev": "npm run dev --workspace @agentops/web",
-    "build": "npm run build --workspace @agentops/web",
+    "dev:api": "npm run dev --workspace @agentops/api",
+    "build": "npm run build --workspace @agentops/api && npm run build --workspace @agentops/web",
     "preview": "npm run preview --workspace @agentops/web",
     "test": "vitest run"
   },
