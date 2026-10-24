@@ -6,6 +6,10 @@
   "scripts": {
     "dev": "npm run dev --workspace @agentops/web",
     "build": "npm run build --workspace @agentops/web",
-    "preview": "npm run preview --workspace @agentops/web"
+    "preview": "npm run preview --workspace @agentops/web",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "vitest": "^2.1.5"
   }
 }

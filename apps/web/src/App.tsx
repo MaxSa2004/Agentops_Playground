@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { runTriageWorkflow, simulateDecisions, type WorkflowEvent, type WorkflowInput } from '@agentops/core'
 import {
   Activity, ArrowDownRight, ArrowUpRight, BadgeCheck, Boxes, BrainCircuit,
   Check, ChevronDown, CircleHelp, Clock3, Command, Database, FileText, Gauge,
@@ -7,60 +8,69 @@ import {
   X,
 } from 'lucide-react'
 
-type EventItem = { time: string; title: string; detail: string; source: string; state: 'done' | 'wait' | 'blocked'; icon: typeof Activity }
-
-const initialEvents: EventItem[] = [
-  { time: '10:42:08', title: 'Request received', detail: 'Refund request · ticket #TK-2048', source: 'WORKFLOW', state: 'done', icon: MessageSquareText },
-  { time: '10:42:09', title: 'Request interpreted', detail: 'Customer asks for a refund after a delayed delivery.', source: 'DEMO AI', state: 'done', icon: Sparkles },
-  { time: '10:42:09', title: 'Typed decisions generated', detail: 'Billing · Urgent · Severity 2 / 3', source: 'SIMULATOR', state: 'done', icon: BrainCircuit },
-  { time: '10:42:10', title: 'Ticket retrieved', detail: 'get_ticket({ id: "TK-2048" })', source: 'DEMO MCP', state: 'done', icon: Database },
-  { time: '10:42:10', title: 'Policy requires approval', detail: 'Changing priority needs human review.', source: 'POLICY', state: 'wait', icon: ShieldAlert },
+type Scenario = { label: string; input: WorkflowInput; action: string }
+const scenarios: Scenario[] = [
+  { label: 'Refund request', input: { ticketId: 'TK-2048', request: 'Analyse this customer’s refund request, retrieve the support ticket, determine urgency, and recommend the next action.', issueType: 'refund', customerImpact: 'single_customer', daysWaiting: 8 }, action: 'Raise ticket priority to High' },
+  { label: 'Login issue', input: { ticketId: 'TK-1982', request: 'A customer cannot access their account after resetting their password. Find the ticket and recommend a safe next step.', issueType: 'account_access', customerImpact: 'single_customer', daysWaiting: 1 }, action: 'Send account recovery instructions' },
+  { label: 'Damaged delivery', input: { ticketId: 'TK-2116', request: 'Review the damaged delivery complaint and determine the right team and recommended action.', issueType: 'damaged_delivery', customerImpact: 'single_customer', daysWaiting: 3 }, action: 'Escalate to the shipping team' },
 ]
 
-const scenarios = [
-  { label: 'Refund request', ticket: 'TK-2048', request: 'Analyse this customer’s refund request, retrieve the support ticket, determine urgency, and recommend the next action.', department: 'Billing', urgency: 'Urgent', severity: 2, action: 'Raise ticket priority to High' },
-  { label: 'Login issue', ticket: 'TK-1982', request: 'A customer cannot access their account after resetting their password. Find the ticket and recommend a safe next step.', department: 'Technical support', urgency: 'Normal', severity: 1, action: 'Send account recovery instructions' },
-  { label: 'Damaged delivery', ticket: 'TK-2116', request: 'Review the damaged delivery complaint and determine the right team and recommended action.', department: 'Shipping', urgency: 'Urgent', severity: 3, action: 'Escalate to the shipping team' },
-]
+const eventPresentation: Record<WorkflowEvent['type'], { title: string; source: string; icon: typeof Activity; state: 'done' | 'wait' }> = {
+  task_received: { title: 'Task received', source: 'WORKFLOW', icon: MessageSquareText, state: 'done' },
+  decisions_generated: { title: 'Typed decisions generated', source: 'SIMULATOR', icon: BrainCircuit, state: 'done' },
+  tool_requested: { title: 'Tool requested', source: 'DEMO MCP', icon: Database, state: 'done' },
+  tool_result: { title: 'Tool result received', source: 'DEMO MCP', icon: Database, state: 'done' },
+  policy_evaluated: { title: 'Policy evaluation', source: 'PHASE 3 PREVIEW', icon: ShieldAlert, state: 'wait' },
+  workflow_completed: { title: 'Workflow completed', source: 'WORKFLOW', icon: Check, state: 'done' },
+}
 
 function App() {
   const [scenarioIndex, setScenarioIndex] = useState(0)
-  const [request, setRequest] = useState(scenarios[0].request)
-  const [events, setEvents] = useState(initialEvents)
+  const [workflowInput, setWorkflowInput] = useState<WorkflowInput>(scenarios[0].input)
+  const [workflowResult, setWorkflowResult] = useState<ReturnType<typeof runTriageWorkflow> | null>(null)
   const [running, setRunning] = useState(false)
   const [decision, setDecision] = useState<'pending' | 'approved' | 'rejected'>('pending')
   const [activeNav, setActiveNav] = useState('Overview')
   const [mobileNav, setMobileNav] = useState(false)
   const [notice, setNotice] = useState('')
   const current = scenarios[scenarioIndex]
+  const previewDecisions = simulateDecisions(workflowInput)
 
   const pickScenario = (index: number) => {
     setScenarioIndex(index)
-    setRequest(scenarios[index].request)
+    setWorkflowInput(scenarios[index].input)
+    setWorkflowResult(null)
     setDecision('pending')
-    setEvents(initialEvents.map((event, i) => i === 0 ? { ...event, detail: `${scenarios[index].label} · ticket #${scenarios[index].ticket}` } : event))
   }
 
   const runWorkflow = () => {
-    if (!request.trim()) { setNotice('Add a request before running the demonstration.'); return }
+    if (!workflowInput.request.trim()) { setNotice('Add a request before running the demonstration.'); return }
     setRunning(true); setDecision('pending'); setNotice('')
-    const now = new Date().toLocaleTimeString('en-GB', { hour12: false })
-    setEvents([
-      { ...initialEvents[0], time: now, detail: `${current.label} · ticket #${current.ticket}` },
-      ...initialEvents.slice(1),
-    ])
-    window.setTimeout(() => setRunning(false), 650)
+    try {
+      setWorkflowResult(runTriageWorkflow(workflowInput))
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : 'The demonstration workflow could not run.')
+    } finally {
+      window.setTimeout(() => setRunning(false), 350)
+    }
   }
 
   const resolveApproval = (outcome: 'approved' | 'rejected') => {
     setDecision(outcome)
-    setEvents((previous) => [...previous, {
-      time: new Date().toLocaleTimeString('en-GB', { hour12: false }),
-      title: outcome === 'approved' ? 'Action approved and executed' : 'Action rejected',
-      detail: outcome === 'approved' ? `${current.action} · demonstration dataset` : 'No changes were made to the demonstration ticket.',
-      source: outcome === 'approved' ? 'HUMAN + DEMO' : 'HUMAN', state: outcome === 'approved' ? 'done' : 'blocked', icon: outcome === 'approved' ? Check : X,
-    }])
+    setNotice(outcome === 'approved' ? 'Approval interaction preview only; no ticket was changed.' : 'Action rejected in the approval interface preview; no ticket was changed.')
   }
+
+  const setInput = <K extends keyof WorkflowInput>(key: K, value: WorkflowInput[K]) => {
+    setWorkflowInput((previous) => ({ ...previous, [key]: value }))
+  }
+
+  const eventRows = (workflowResult?.events ?? []).map((event) => ({
+    ...eventPresentation[event.type],
+    time: new Date(event.timestamp).toLocaleTimeString('en-GB', { hour12: false }),
+    detail: event.message,
+    source: event.origin === 'decision-simulator' ? 'SIMULATOR' : event.origin === 'mcp-demo' ? 'DEMO MCP' : event.origin === 'policy-preview' ? 'PHASE 3 PREVIEW' : 'WORKFLOW',
+    key: event.id,
+  }))
 
   const navItems = [
     { name: 'Overview', icon: LayoutDashboard, target: 'overview' },
@@ -109,22 +119,23 @@ function App() {
           <section className="playground-grid" id="playground">
             <article className="panel request-panel"><div className="panel-heading"><div className="panel-title-icon purple"><Sparkles size={16} /></div><div><h3>Try a scenario</h3><p>Give your agent a task to work through</p></div><button className="small-more" aria-label="More options"><MoreHorizontal size={18} /></button></div>
               <label className="field-label" htmlFor="scenario-select">SCENARIO</label><div className="select-wrap"><select id="scenario-select" value={scenarioIndex} onChange={(event) => pickScenario(Number(event.target.value))}>{scenarios.map((scenario, index) => <option value={index} key={scenario.label}>{scenario.label}</option>)}</select><ChevronDown size={15} /></div>
-              <label className="field-label request-label" htmlFor="request">YOUR REQUEST</label><textarea id="request" value={request} onChange={(event) => setRequest(event.target.value)} rows={4} />
-              <div className="request-footer"><span><span className="sim-indicator" /> Deterministic demo · no live AI</span><span>{request.length} / 500</span></div>
+              <label className="field-label request-label" htmlFor="request">YOUR REQUEST</label><textarea id="request" value={workflowInput.request} onChange={(event) => setInput('request', event.target.value)} rows={4} maxLength={500} />
+              <div className="input-controls"><label>Issue type<select value={workflowInput.issueType} onChange={(event) => setInput('issueType', event.target.value as WorkflowInput['issueType'])}><option value="refund">Refund</option><option value="account_access">Account access</option><option value="damaged_delivery">Damaged delivery</option><option value="general">General inquiry</option></select></label><label>Customer impact<select value={workflowInput.customerImpact} onChange={(event) => setInput('customerImpact', event.target.value as WorkflowInput['customerImpact'])}><option value="single_customer">One customer</option><option value="multiple_customers">Multiple customers</option><option value="business_blocking">Business blocked</option></select></label><label>Days waiting<input type="number" min="0" max="60" value={workflowInput.daysWaiting} onChange={(event) => setInput('daysWaiting', Number(event.target.value))} /></label></div>
+              <div className="request-footer"><span><span className="sim-indicator" /> Deterministic demo · simulated decisions only</span><span>{workflowInput.request.length} / 500</span></div>
               <button className="run-button" onClick={runWorkflow} disabled={running}>{running ? <><span className="button-spinner" /> Running workflow…</> : <><Play size={15} fill="currentColor" /> Run workflow <span className="button-shortcut">⌘ ↵</span></>}</button>
               <div className="workflow-mini"><div className="mini-step"><span className="mini-icon icon-ai"><Sparkles size={13} /></span><span>Interpret request</span></div><span className="mini-connector" /><div className="mini-step"><span className="mini-icon icon-decide"><BrainCircuit size={13} /></span><span>Typed decisions</span></div><span className="mini-connector" /><div className="mini-step"><span className="mini-icon icon-tool"><Database size={13} /></span><span>Retrieve ticket</span></div><span className="mini-connector" /><div className="mini-step"><span className="mini-icon icon-policy"><Shield size={13} /></span><span>Check policy</span></div></div>
             </article>
 
-            <article className="panel timeline-panel" id="timeline"><div className="panel-heading timeline-heading"><div><h3>Execution timeline</h3><p>Observable events from the latest run</p></div><div className="run-status"><span className="status-pulse" /> {running ? 'RUNNING' : 'COMPLETED'}</div></div>
-              <div className="timeline">{events.map((event, index) => <div className={`timeline-event ${event.state}`} key={`${event.title}-${index}`}><div className="timeline-rail"><div className={`event-icon ${event.state}`}><event.icon size={14} /></div>{index < events.length - 1 && <span className="rail-line" />}</div><div className="event-copy"><div className="event-top"><strong>{event.title}</strong><time>{event.time}</time></div><p>{event.detail}</p><span className={`source-tag source-${event.source.toLowerCase().replace(/ /g, '-')}`}>{event.source}</span></div></div>)}</div>
-              <button className="view-events" onClick={() => setNotice('You are viewing all events in this demonstration run.')}>View all events <ArrowDownRight size={14} /></button>
+            <article className="panel timeline-panel" id="timeline"><div className="panel-heading timeline-heading"><div><h3>Execution timeline</h3><p>Observable events from the latest run</p></div><div className="run-status"><span className="status-pulse" /> {running ? 'RUNNING' : workflowResult ? 'COMPLETED' : 'READY'}</div></div>
+              {eventRows.length ? <div className="timeline">{eventRows.map((event, index) => <div className={`timeline-event ${event.state}`} key={event.key}><div className="timeline-rail"><div className={`event-icon ${event.state}`}><event.icon size={14} /></div>{index < eventRows.length - 1 && <span className="rail-line" />}</div><div className="event-copy"><div className="event-top"><strong>{event.title}</strong><time>{event.time}</time></div><p>{event.detail}</p><span className={`source-tag source-${event.source.toLowerCase().replace(/ /g, '-')}`}>{event.source}</span></div></div>)}</div> : <div className="timeline-empty"><Activity size={17} /><span>Run the workflow to generate observable events.</span></div>}
+              <button className="view-events" onClick={() => setNotice('Timeline entries are deterministic demonstration events.')}>Event origins are labeled <ArrowDownRight size={14} /></button>
             </article>
           </section>
 
           <div className="lower-grid">
             <section className="panel decisions-panel" id="decisions"><div className="panel-heading"><div><h3>Decision inspector</h3><p>Bounded outputs with visible sources</p></div><span className="sim-badge"><span className="sim-indicator" /> SIMULATED</span></div>
-              <div className="decision-rows"><DecisionRow icon={BrainCircuit} type="CHOICE · DEPARTMENT" value={current.department} source="decision-simulator" tone="violet" /><DecisionRow icon={Activity} type="NOUL · URGENCY" value={current.urgency} source="decision-simulator" tone="amber" /><DecisionRow icon={Gauge} type="SCORE · SEVERITY" value={<>{current.severity}<span className="score-max"> / 3</span></>} source="decision-simulator" tone="blue" /></div>
-              <div className="recommendation"><div className="recommend-icon"><Sparkles size={15} /></div><div><span>DEMO RECOMMENDATION</span><p>Review the delivery history, then offer a refund in line with the late-delivery policy.</p><small>Illustrative generated output · not live AI</small></div></div>
+              <div className="decision-rows"><DecisionRow icon={BrainCircuit} type="CHOICE · DEPARTMENT" value={previewDecisions.department.value.replace(/_/g, ' ')} source="decision-simulator" tone="violet" /><DecisionRow icon={Activity} type="NOUL · URGENCY" value={previewDecisions.urgency.value ? 'Urgent' : 'Normal'} source="decision-simulator" tone="amber" /><DecisionRow icon={Gauge} type="SCORE · SEVERITY" value={<>{previewDecisions.severity.value}<span className="score-max"> / {previewDecisions.severity.scale.max}</span></>} source="decision-simulator" tone="blue" /></div>
+              <div className="recommendation"><div className="recommend-icon"><Sparkles size={15} /></div><div><span>DEMO WORKFLOW RECOMMENDATION</span><p>{workflowResult?.recommendation ?? 'Adjust the scenario inputs to preview the decisions, then run the workflow for a structured recommendation.'}</p><small>Deterministic demonstration · not live AI</small></div></div>
             </section>
 
             <section className="panel tools-panel" id="tools"><div className="panel-heading"><div><h3>MCP tool explorer</h3><p>Available tools in this workflow</p></div><button className="text-button" onClick={() => setNotice('Tool schemas will be available when the real MCP server is added in a later phase.')}>Explore tools <ArrowUpRight size={14} /></button></div>
@@ -133,7 +144,7 @@ function App() {
             </section>
           </div>
 
-          <section className="panel approval-panel" id="approval"><div className="approval-left"><div className="approval-shield"><LockKeyhole size={18} /></div><div><div className="approval-kicker"><span className="approval-dot" /> HUMAN APPROVAL REQUIRED <span className="approval-id">PENDING · AP-0084</span></div><h3>Review proposed action</h3><p>The agent recommends changing priority for <strong>{current.ticket}</strong>.</p></div></div><div className="approval-action"><div><span>PROPOSED ACTION</span><strong>{current.action}</strong><small><Shield size={12} /> Policy: approval required</small></div>{decision === 'pending' ? <div className="approval-buttons"><button className="reject-button" onClick={() => resolveApproval('rejected')}>Reject</button><button className="approve-button" onClick={() => resolveApproval('approved')}><Check size={14} /> Approve action</button></div> : <div className={`resolved-badge ${decision}`}><Check size={14} /> {decision === 'approved' ? 'Approved · demo executed' : 'Rejected · no changes'}</div>}</div></section>
+          <section className="panel approval-panel" id="approval"><div className="approval-left"><div className="approval-shield"><LockKeyhole size={18} /></div><div><div className="approval-kicker"><span className="approval-dot" /> APPROVAL INTERFACE PREVIEW <span className="approval-id">POLICY · PHASE 3</span></div><h3>Review proposed action</h3><p>Illustrative ticket <strong>{workflowInput.ticketId}</strong>; no operation is connected in Phase 2.</p></div></div><div className="approval-action"><div><span>PROPOSED ACTION</span><strong>{current.action}</strong><small><Shield size={12} /> Policy enforcement arrives in Phase 3</small></div>{decision === 'pending' ? <div className="approval-buttons"><button className="reject-button" onClick={() => resolveApproval('rejected')}>Reject</button><button className="approve-button" onClick={() => resolveApproval('approved')}><Check size={14} /> Preview approval</button></div> : <div className={`resolved-badge ${decision}`}><Check size={14} /> {decision === 'approved' ? 'Previewed · no changes' : 'Rejected · no changes'}</div>}</div></section>
 
           <footer className="page-footer"><div><span className="footer-mark"><Command size={13} /></span><span>AgentOps Playground</span><span className="footer-sep">·</span><span>Understand. Decide. Act. Safely.</span></div><div><span className="footer-demo-dot" /> Public demo <span className="footer-sep">·</span><button onClick={() => setNotice('This portfolio demo uses fictional data only.')}>About this demo <ArrowUpRight size={12} /></button></div></footer>
         </div>
